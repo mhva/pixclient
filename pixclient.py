@@ -670,7 +670,7 @@ def subcommand_illust():
     else:
       raise
 
-  if args.proxy_url:
+  if args.proxy_url and len(args.proxy_url.strip()) > 0:
     setup_proxy(args.proxy_url)
 
   try:
