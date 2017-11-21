@@ -19,7 +19,7 @@ from itertools import *
 from urllib import quote_plus
 from stat import S_ISDIR
 
-from pixivpy3.api import PixivAPI
+from pixivpy3.papi import PixivAPI
 from pixivpy3.utils import PixivError
 from config import pixclient_config
 
