@@ -287,17 +287,18 @@ class PixclientPixivAPI(object):
       except:
         raise UnknownServiceError(response)
 
-def print_info(s):
-  sys.stderr.write('\033[94m%s\033[0m\n' % s)
-  sys.stderr.flush()
-
-def print_debug(s):
+def print_stderr(s):
   sys.stderr.write('%s\n' % s)
   sys.stderr.flush()
 
+def print_info(s):
+  print_stderr('\033[94m%s\033[0m' % s)
+
+def print_debug(s):
+  print_stderr('%s' % s)
+
 def print_error(s):
-  sys.stderr.write('\033[91;1m%s\033[0m\n' % s)
-  sys.stderr.flush()
+  print_stderr('\033[91;1m%s\033[0m' % s)
 
 def die(s, exit_code=1):
   print_error(s)
