@@ -6,6 +6,7 @@ import requests
 
 import argparse
 import errno
+import json
 import math
 import os
 import pprint
@@ -29,15 +30,15 @@ class ServiceError(Exception):
   interacting with its APIs.
   """
   def __init__(self):
-    super(Exception, self).__init__()
+    super(ServiceError, self).__init__()
 
 class UnknownServiceError(ServiceError):
   """
   A generic service error that does not have an associated error message.
   """
-  def __init__(self):
-    super(ServiceError, self).__init__()
-
+  def __init__(self, response):
+    super(UnknownServiceError, self).__init__()
+    self.response = response
 
 class OtherServiceError(ServiceError):
   """
@@ -46,33 +47,33 @@ class OtherServiceError(ServiceError):
   read from the |error_text| member variable.
   """
   def __init__(self, text):
-    super(Exception, self).__init__()
+    super(OtherServiceError, self).__init__()
     self.error_text = text
 
 class AuthenticationError(ServiceError):
   def __init__(self, text):
-    super(ServiceError, self).__init__()
+    super(AuthenticationError, self).__init__()
     self.error_text = text
 
 class IllustrationDoesNotExistError(ServiceError):
   def __init__(self):
-    super(ServiceError, self).__init__()
+    super(IllustrationDoesNotExistError, self).__init__()
 
 class DownloadFailure(Exception):
   def __init__(self, url, local_file, error):
-    super(Exception, self).__init__()
+    super(DownloadFailure, self).__init__()
     self.remote_url = url
     self.local_file = local_file
     self.error = error
 
 class FileAlreadyExistsError(Exception):
   def __init__(self, local_file):
-    super(Exception, self).__init__()
+    super(FileAlreadyExistsError, self).__init__()
     self.local_file = local_file
 
 class UnsupportedImageQualityError(Exception):
   def __init__(self, image_dict):
-    super(Exception, self).__init__()
+    super(UnsupportedImageQualityError, self).__init__()
     self.bad_image_dict = image_dict
 
 class IllustMetadata(object):
@@ -130,6 +131,138 @@ class IllustMetadata(object):
         return url
     return None
 
+class PixclientPixivAPI(object):
+  def __init__(self, username, password, auth_cache_file=None):
+    super(PixclientPixivAPI, self).__init__()
+    self._api = None
+    self._username = username
+    self._password = password
+    if auth_cache_file is not None and len(auth_cache_file.strip()) > 0:
+      self._auth_cache_file = auth_cache_file
+    else:
+      self._auth_cache_file = None
+
+  def _login_using_password(self):
+    """
+    Authenticates with pixiv using login/password pair. May throw
+    an AuthenticationError exception, if given login credentials are incorrect.
+
+    Returns a PixivAPI object.
+    """
+    pixiv_api = PixivAPI()
+
+    try:
+      pixiv_api.login(self._username, self._password)
+    except PixivError as e:
+      raise AuthenticationError('Username or password is incorrect')
+    return pixiv_api
+
+  def _login_using_cached_session_token(self):
+    """
+    Builds a PixivAPI object using cached session token.
+    Returns a PixivAPI object or None, if there's no cached token.
+    """
+    if self._auth_cache_file is not None:
+      try:
+        with open(self._auth_cache_file, 'r') as f:
+          auth_info = json.load(f)
+
+        if auth_info.get('session_token') is not None \
+            and auth_info.get('refresh_token') is not None:
+          pixiv_api = PixivAPI()
+          pixiv_api.set_auth(
+            auth_info['session_token'],
+            auth_info['refresh_token'])
+          return pixiv_api
+      except IOError as e:
+        if e.errno != errno.ENOENT:
+          raise
+      except PixivError:
+        raise
+      except Exception as e:
+        pass
+    return None
+
+  def _login_using_refresh_token(self):
+    raise RuntimeError("__login_using_refresh_token: not implemented")
+
+  def _login(self, force_relogin=False):
+    """
+    Tries to authenticate with pixiv using username/password pair provided
+    in constructor. If session token has already been cached, does nothing.
+
+    Returns a PixivAPI object.
+    """
+    pixiv_api = None
+
+    if not force_relogin and self._api is not None:
+      return
+    if not force_relogin:
+      pixiv_api = self._login_using_cached_session_token()
+
+    if pixiv_api is None:
+      pixiv_api = self._login_using_password()
+
+      # Save session token to cache.
+      if self._auth_cache_file is not None:
+        with open(self._auth_cache_file, 'w') as f:
+          auth_info = {
+            'session_token': pixiv_api.access_token,
+            'refresh_token': pixiv_api.refresh_token
+          }
+          json.dump(auth_info, f)
+
+    self._api = pixiv_api
+
+  def __authenticated_call(f):
+    """
+    Function decorator that will add auto-login capability to authenticated
+    API calls. If it detects an authentication error in server's response,
+    it will attempt to refresh session token and will invoke target function
+    one more time.
+    """
+    def wrap(self, *args, **kwargs):
+      self._login()
+      response = f(self, *args, **kwargs)
+      try:
+        if response.get('status', 'failure') == 'failure':
+          msg = response['errors']['system']['message']
+          if msg.find('access token provided is invalid') != -1:
+            self._login(force_relogin=True)
+            return f(self, *args, **kwargs)
+          return response
+      except KeyError:
+        pass
+      return response
+    return wrap
+
+  @__authenticated_call
+  def _api_call_works(self, illust_id):
+    return self._api.works(illust_id)
+
+  def artwork_info(self, illust_id):
+    """
+    Returns metadata for pixiv illustration with |illust_id| id.
+    Returns a list of IllustMetadata objects.
+    """
+    response = self._api_call_works(illust_id)
+
+    if response.get('status', 'failure') == 'success':
+      # It seems that server response could have multiple metadata blobs (for
+      # different illustrations?). I haven't encountered the case with the multiple
+      # blobs out in the wild yet, but to be on the safe side treat each blob as a
+      # separate artwork.
+      illust_descriptors = response['response']
+      return [IllustMetadata(x) for x in illust_descriptors]
+    else:
+      try:
+        if 'code' in response['errors']['system'] \
+            and response['errors']['system']['code'] == 206:
+          raise IllustrationDoesNotExistError()
+        raise OtherServiceError(response['errors']['system']['message'])
+      except:
+        raise UnknownServiceError(response)
+
 def print_info(s):
   sys.stderr.write('\033[94m%s\033[0m\n' % s)
   sys.stderr.flush()
@@ -177,35 +310,6 @@ def setup_proxy(url):
   socks.set_default_proxy(proxy_type, address, port, rdns, user, password)
   socket.socket = socks.socksocket
 
-def raise_service_error(response):
-  """
-  Throws an exception based on type of the error contained in the response.
-  This function should be used only on responses that contain error.
-  """
-  try:
-    if 'code' in response['errors']['system']:
-      if response['errors']['system']['code'] == 206:
-         raise IllustrationDoesNotExistError()
-    if 'message' in response['errors']['system']:
-      msg = response['errors']['system']['message']
-      # Auth error does not have an error code associated with it, try to
-      # guess it based on the error message's text.
-      #
-      # This code will certainly break if pixiv decides to localize this string
-      # based on user's language or location..
-      if msg.find('access token provided is invalid') != -1:
-        raise AuthenticationError(msg)
-      raise OtherServiceError(msg)
-  except ServiceError as e:
-    if type(e) == UnknownServiceError:
-      dump_response(response)
-    raise
-  except:
-    pass
-
-  dump_response(response)
-  raise UnknownServiceError()
-
 def guess_file_extension(url):
   default_ext = u'png'
   url_object = urlparse.urlparse(url)
@@ -217,6 +321,9 @@ def guess_file_extension(url):
     return fileext
   else:
     return default_ext
+
+def pixclient_path():
+  return os.path.join(sys.path[0], './')
 
 def make_directory(name, mode=0755):
   """
@@ -234,49 +341,6 @@ def make_directory(name, mode=0755):
       raise
     else:
       print_debug('Directory %s already exists' % name)
-
-def login(username, password):
-  """
-  Authenticates with pixiv using login/password pair. May throw
-  an AuthenticationError exception, if given login credentials are incorrect.
-
-  Returns a PixivAPI object.
-  """
-  pixiv_api = PixivAPI()
-
-  # Redirect stdout to /dev/null to prevent PixivAPI's login method
-  # from printing junk to stdout.
-  dev_null_fd = open(os.devnull, 'w')
-  orig_stdout = sys.stdout
-  try:
-    sys.stdout = dev_null_fd
-    pixiv_api.login(username, password)
-  except PixivError as e:
-    sys.stdout = orig_stdout
-    print(e)
-    raise AuthenticationError('Username or password is incorrect')
-  finally:
-    sys.stdout = orig_stdout
-    dev_null_fd.close()
-  return pixiv_api
-
-def login_using_session_data(token):
-  """
-  Builds a PixivAPI object using existing session data.
-  Returns a PixivAPI object.
-  """
-  pixiv_api = PixivAPI()
-  pixiv_api.set_auth(token)
-  return pixiv_api
-
-def extract_artwork_metadata(response):
-  illust_descriptors = response['response']
-
-  # It seems that server response could have multiple metadata blobs (for
-  # different illustrations?). I haven't encountered the case with the multiple
-  # blobs out in the wild yet, but to be on the safe side treat each blob as a
-  # separate artwork.
-  return [IllustMetadata(x) for x in illust_descriptors]
 
 class BackoffStrategy(object):
   def __init__(self, backoff_interval=None, backoff_exponent=None,
@@ -306,7 +370,7 @@ class BackoffStrategy(object):
       return False
 
 class DownloadProgress(object):
-  """Draws a simplistic download progress in terminal."""
+  """Draws a simplistic download progress bar in terminal."""
 
   def _convert_to_units(self, byte_value):
     gb = 1 * 1024 * 1024 * 1024
@@ -607,27 +671,6 @@ def fetch_artwork(illust_metadata, download_session,
   print_info('Files were saved to: %s' % dest_dir)
   return failed_downloads
 
-def subcommand_login():
-  argp = argparse.ArgumentParser(prog='%s login' % sys.argv[0],
-    description='authenticate on pixiv as user')
-  argp.add_argument('-u', '--user', dest='user', required=True,
-    default=pixclient_config.get('username'), help='pixiv login')
-  argp.add_argument('-p', '--password', dest='password', required=True,
-    default=pixclient_config.get('password'), help='pixiv password')
-  argp.add_argument('-x', '--proxy', metavar='URL', dest='proxy_url',
-    default=pixclient_config.get('proxy'),
-    help='SOCKS server URL (syntax is the same as cURL)')
-  argp.add_argument('--user-agent', dest='user_agent', metavar='UA',
-    default=pixclient_config.get('user-agent'),
-    help='user agent for HTTP requests')
-  args = argp.parse_args(sys.argv[2:])
-
-  if args.proxy_url:
-    setup_proxy(args.proxy_url)
-
-  pixiv_api = login(args.user, args.password)
-  print(pixiv_api.access_token)
-
 def subcommand_illust():
   def unicode_arg(x):
     return x.decode(sys.getfilesystemencoding())
@@ -638,8 +681,6 @@ def subcommand_illust():
     default=pixclient_config.get('username'), help='pixiv login')
   argp.add_argument('-p', '--password', dest='password', metavar='PASS',
     default=pixclient_config.get('password'), help='pixiv password')
-  argp.add_argument('--token', metavar='TOKEN', dest='token',
-    help='pixiv access token as returned by `%s login\'' % sys.argv[0])
   argp.add_argument('--method', metavar='METHOD', dest='method',
     choices=['curl', 'requests'], default='requests', help='download method')
   argp.add_argument('--delay', metavar='DELAY', dest='delay', type=int,
@@ -675,54 +716,61 @@ def subcommand_illust():
 
   try:
     if args.user and args.password:
-      print_info('Trying to sign in as %s' % args.user)
-      pixiv_api = login(args.user, args.password)
-    elif args.id and args.token:
-      print_info('Skipping sign-in because a session token was specified')
-      pixiv_api = login_using_session_data(args.token)
+      print_info('Will log in as %s' % args.user)
     else:
-      die("No valid login credentials found; login credentials could be "
-          "specified using either --user/--password or --token argument")
+      die("No valid login credentials found; login credentials must be "
+          "specified using either --user/--password arguments or in config "
+          "file")
+
+    # Expand path in auth_cache_file. If it's relative, convert to absolute.
+    auth_cache_file = pixclient_config.get('auth_cache_file')
+    if auth_cache_file is not None and len(auth_cache_file) > 0:
+      auth_cache_file = os.path.expandvars(auth_cache_file)
+      if not os.path.isabs(auth_cache_file):
+        auth_cache_file = os.path.join(pixclient_path(), auth_cache_file)
+    else:
+      auth_cache_file = None
 
     print_info('Fetching artwork metadata')
-    response = pixiv_api.works(args.illust_id)
-    if response.get('status', 'failure') == 'success':
-      artworks = extract_artwork_metadata(response)
-      backoff_strat = BackoffStrategy(
-          backoff_interval=pixclient_config.get('backoff-interval')
-        , backoff_exponent=pixclient_config.get('backoff-exponent')
-        , backoff_limit=pixclient_config.get('backoff-limit')
-        , max_retries=pixclient_config.get('max-retries')
+    pixiv_api = PixclientPixivAPI(args.user, args.password,
+      auth_cache_file=auth_cache_file)
+    artworks = pixiv_api.artwork_info(args.illust_id)
+
+    backoff_strat = BackoffStrategy(
+        backoff_interval=pixclient_config.get('backoff-interval')
+      , backoff_exponent=pixclient_config.get('backoff-exponent')
+      , backoff_limit=pixclient_config.get('backoff-limit')
+      , max_retries=pixclient_config.get('max-retries')
+    )
+
+    if args.method == 'curl':
+      download_session = CURLDownloadSession(
+          backoff_strategy=backoff_strat
+        , proxy_url=args.proxy_url
+        , user_agent=args.user_agent
+      )
+    else:
+      download_session = PyRequestsDownloadSession(
+          backoff_strategy=backoff_strat
+        , user_agent=args.user_agent
+        , keep_alive=False if args.delay > 4 else True
       )
 
-      if args.method == 'curl':
-        download_session = CURLDownloadSession(
-            backoff_strategy=backoff_strat
-          , proxy_url=args.proxy_url
-          , user_agent=args.user_agent
-        )
-      else:
-        download_session = PyRequestsDownloadSession(
-            backoff_strategy=backoff_strat
-          , user_agent=args.user_agent
-          , keep_alive=False if args.delay > 4 else True
-        )
-
-      for a in artworks:
-        fetch_artwork(a, download_session,
-          output=args.output,
-          delay=args.delay,
-          keep_going=args.keep_going)
-    else:
-      raise_service_error(response)
+    for a in artworks:
+      fetch_artwork(a, download_session,
+        output=args.output,
+        delay=args.delay,
+        keep_going=args.keep_going)
   except AuthenticationError as e:
     # Set exit code to 2 to allow scripts to detect expired session.
     die("Authentication error: %s." % e.error_text, exit_code=2)
   except IllustrationDoesNotExistError:
     die("Illustration #%d does not exist." % args.illust_id)
   except OtherServiceError as e:
-    dump_response(response)
-    die("Unknown Pixiv error: %s." % e.error_text)
+    die("Pixiv server returned an error: %s." % e.error_text)
+  except UnknownServiceError as e:
+    dump_response(e.response)
+    die("Pixiv returned unknown response")
   except DownloadFailure as e:
     die("Could not save remote document " + \
         "(%s) to a local file (%s): %s." % \
@@ -734,12 +782,10 @@ def subcommand_illust():
 if __name__ == '__main__':
   argp = argparse.ArgumentParser(
     description='Description goes here')
-  argp.add_argument('verb', choices=['login', 'illust'],
+  argp.add_argument('verb', choices=['illust'],
     help='supported program verbs')
   args = argp.parse_args(sys.argv[1:2])
-  if args.verb == 'login':
-    subcommand_login()
-  elif args.verb == 'illust':
+  if args.verb == 'illust':
     subcommand_illust()
   else:
     print_error("Unknown verb \'%s\'" % args.verb)
