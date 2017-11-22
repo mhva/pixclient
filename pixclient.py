@@ -10,6 +10,7 @@ import json
 import math
 import os
 import pprint
+import re
 import subprocess
 import sys
 import time
@@ -22,7 +23,6 @@ from stat import S_ISDIR
 from pysocks import socks
 from pixivpy3.papi import PixivAPI
 from pixivpy3.utils import PixivError
-from config import pixclient_config
 
 class ServiceError(Exception):
   """
@@ -260,6 +260,10 @@ class PixclientPixivAPI(object):
             and response['errors']['system']['code'] == 206:
           raise IllustrationDoesNotExistError()
         raise OtherServiceError(response['errors']['system']['message'])
+      except IllustrationDoesNotExistError:
+        raise
+      except OtherServiceError:
+        raise
       except:
         raise UnknownServiceError(response)
 
@@ -324,6 +328,64 @@ def guess_file_extension(url):
 
 def pixclient_path():
   return os.path.join(sys.path[0], './')
+
+def utf8_please(o):
+  """
+  Undoes unicode conversion of strings that json module performs by default.
+  Returns a new dictionary containing utf-8 encoded str's instead of
+  unicode objects.
+  """
+  if isinstance(o, list):
+    return map(lambda x: utf8_please(x), o)
+  elif isinstance(o, dict):
+    return {utf8_please(k): utf8_please(v) for k, v in o.items() }
+  elif isinstance(o, unicode):
+    return o.encode('utf-8')
+  else:
+    return o
+
+def load_config():
+  """
+  Reads config from file and returns a dictionary with config entries.
+  """
+
+  # HACK: Find location of config file from args. This is needed so we can
+  # access config data early, even before parsing other arguments.
+  bootstrap_argp = argparse.ArgumentParser(add_help=False)
+  bootstrap_argp.add_argument('-c', '--config', dest='config')
+  bootstrap_args = bootstrap_argp.parse_known_args(sys.argv)[0]
+
+  if bootstrap_args.config is not None:
+    filename = bootstrap_args.config
+  else:
+    return {}
+
+  try:
+    with open(filename, 'r') as f:
+      # Remove comments.
+      pseudo_json = f.read()
+      clean_json = re.sub(r'^[^\S\r\n]*\/\/.*$', '', pseudo_json, flags=re.MULTILINE)
+
+      return process_config(utf8_please(json.loads(clean_json)))
+  except ValueError as e:
+    die("Malformed JSON content in config file. (%s)" % str(e))
+  except IOError as e:
+    die("IO error while reading config file. (%s)" % e.strerror)
+  except Exception as e:
+    die("Unable to process config file. (%s)" % str(e))
+
+def process_config(config):
+  # Expand path in auth_cache_file. If it's relative, convert to absolute.
+  if 'auth_cache_file' in config:
+    auth_cache_file = config['auth_cache_file']
+    if len(auth_cache_file) > 0:
+      auth_cache_file = os.path.expandvars(auth_cache_file)
+      if not os.path.isabs(auth_cache_file):
+        auth_cache_file = os.path.join(pixclient_path(), auth_cache_file)
+    else:
+      auth_cache_file = None
+    config['auth_cache_file'] = auth_cache_file
+  return config
 
 def make_directory(name, mode=0755):
   """
@@ -675,14 +737,24 @@ def subcommand_illust():
   def unicode_arg(x):
     return x.decode(sys.getfilesystemencoding())
 
+  pixclient_config = load_config()
+
+  credentials_required = (pixclient_config.get('username') is None) \
+    | (pixclient_config.get('password') is None)
+
   argp = argparse.ArgumentParser(prog='%s illust' % sys.argv[0],
     description='fetch a single image or a complete collection from Pixiv')
   argp.add_argument('-u', '--user', dest='user',
-    default=pixclient_config.get('username'), help='pixiv login')
-  argp.add_argument('-p', '--password', dest='password', metavar='PASS',
-    default=pixclient_config.get('password'), help='pixiv password')
+    default=pixclient_config.get('username'), help='pixiv login',
+    required=credentials_required)
+  argp.add_argument('-p', '--password', dest='password', metavar='PW',
+    default=pixclient_config.get('password'), help='pixiv password',
+    required=credentials_required)
+  argp.add_argument('-c', '--config', dest='config', metavar='CFG',
+    help='path to config file')
   argp.add_argument('--method', metavar='METHOD', dest='method',
-    choices=['curl', 'requests'], default='requests', help='download method')
+    choices=['curl', 'requests'], help='download method',
+    default=pixclient_config.get('download-method', 'requests'))
   argp.add_argument('--delay', metavar='DELAY', dest='delay', type=int,
     default=1, help='number of seconds to wait between downloads')
   argp.add_argument('--keep-going', dest='keep_going', action='store_true',
@@ -722,18 +794,9 @@ def subcommand_illust():
           "specified using either --user/--password arguments or in config "
           "file")
 
-    # Expand path in auth_cache_file. If it's relative, convert to absolute.
-    auth_cache_file = pixclient_config.get('auth_cache_file')
-    if auth_cache_file is not None and len(auth_cache_file) > 0:
-      auth_cache_file = os.path.expandvars(auth_cache_file)
-      if not os.path.isabs(auth_cache_file):
-        auth_cache_file = os.path.join(pixclient_path(), auth_cache_file)
-    else:
-      auth_cache_file = None
-
     print_info('Fetching artwork metadata')
     pixiv_api = PixclientPixivAPI(args.user, args.password,
-      auth_cache_file=auth_cache_file)
+      auth_cache_file=pixclient_config.get('auth_cache_file'))
     artworks = pixiv_api.artwork_info(args.illust_id)
 
     backoff_strat = BackoffStrategy(
@@ -765,7 +828,7 @@ def subcommand_illust():
     # Set exit code to 2 to allow scripts to detect expired session.
     die("Authentication error: %s." % e.error_text, exit_code=2)
   except IllustrationDoesNotExistError:
-    die("Illustration #%d does not exist." % args.illust_id)
+    die("Illustration with id '%d' does not exist." % args.illust_id)
   except OtherServiceError as e:
     die("Pixiv server returned an error: %s." % e.error_text)
   except UnknownServiceError as e:
