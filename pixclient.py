@@ -92,6 +92,26 @@ class IllustMetadata(object):
     """Returns a description of the artwork."""
     return self._metadata.get('caption', '')
 
+  def get_upload_date(self):
+    """Returns upload date as a string."""
+    return self._metadata.get('reuploaded_time')
+
+  def get_author_id(self):
+    """Returns author id."""
+    return int(self._metadata.get('user', {}).get('id', -1))
+
+  def get_author_name(self):
+    """Returns author display name."""
+    return self._metadata.get('user', {}).get('name')
+
+  def get_author_account(self):
+    """Returns author account name."""
+    return self._metadata.get('user', {}).get('account')
+
+  def get_tags(self):
+    """Returns a list of tags."""
+    return self._metadata.get('tags', [])
+
   def is_multipage(self):
     """Returns True, if the the artwork contains multiple images."""
     m = self._metadata.get('metadata', None)
@@ -718,17 +738,37 @@ def fetch_artwork(illust_metadata, download_session,
   # Write title and description in a separate file.
   description_filename = 'description.txt'
   print_info('Writing description to %s' % description_filename)
-  f = open(os.path.join(dest_dir, description_filename), 'w')
-  try:
+
+  with open(os.path.join(dest_dir, description_filename), 'w') as f:
+    author_display_name = illust_metadata.get_author_name()
+    author_id = illust_metadata.get_author_id()
+    author_account = illust_metadata.get_author_account()
+
+    posting_date = illust_metadata.get_upload_date()
+    tags = ', '.join(illust_metadata.get_tags())
+
     title = illust_metadata.get_title()
     title = title.strip() if title else None
 
     description = illust_metadata.get_description()
     description = description.rstrip() if description else None
 
-    f.write(u'{0}\n{1}\n'.format(title, description).encode('utf-8'))
-  finally:
-    f.close()
+    f.write(ur"""
+AUTHR: {0} ({1}:{2})
+DATE : {3}
+TAGS : {4}
+
+TITLE: {5}
+DESCR: {6}
+      """.strip().format(
+        author_display_name,
+        author_id,
+        author_account,
+        posting_date,
+        tags,
+        title,
+        description).encode('utf-8')
+    )
 
   print_info('Files were saved to: %s' % dest_dir)
   return failed_downloads
