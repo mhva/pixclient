@@ -11,11 +11,13 @@ import math
 import os
 import pprint
 import re
+import socket
 import subprocess
 import sys
 import time
 import urlparse
 
+from contextlib import closing
 from itertools import *
 from urllib import quote_plus
 from stat import S_ISDIR
@@ -58,6 +60,10 @@ class AuthenticationError(ServiceError):
 class IllustrationDoesNotExistError(ServiceError):
   def __init__(self):
     super(IllustrationDoesNotExistError, self).__init__()
+
+class ProxyConnectionFailure(Exception):
+  def __init__(self, proxy_url):
+    self.proxy_url = proxy_url
 
 class DownloadFailure(Exception):
   def __init__(self, url, local_file, error):
@@ -336,6 +342,21 @@ def setup_proxy(url):
 
   print_info('Using %s proxy at %s port %d' % \
     (name_map[url_object.scheme], address, port))
+
+  connectable_address = None
+  connectable_port = None
+  gai_addrs = socket.getaddrinfo(address, port, 0, 0, socket.IPPROTO_TCP)
+
+  for addr in gai_addrs:
+    with closing(socket.socket(addr[0], addr[1], socket.IPPROTO_TCP)) as sock:
+      try:
+        sock.connect((addr[4][0], addr[4][1]))
+        (connectable_address, connectable_port) = addr[4]
+      except:
+        continue
+
+  if connectable_address is None or connectable_port is None:
+    raise ProxyConnectionFailure(url)
 
   socks.set_default_proxy(proxy_type, address, port, rdns, user, password)
   socket.socket = socks.socksocket
@@ -786,7 +807,7 @@ def subcommand_illust():
   pixclient_config = load_config()
 
   credentials_required = (pixclient_config.get('username') is None) \
-    | (pixclient_config.get('password') is None)
+    or (pixclient_config.get('password') is None)
 
   argp = argparse.ArgumentParser(prog='%s illust' % sys.argv[0],
     description='fetch a single image or a complete collection from Pixiv')
@@ -829,10 +850,10 @@ def subcommand_illust():
     else:
       raise
 
-  if args.proxy_url and len(args.proxy_url.strip()) > 0:
-    setup_proxy(args.proxy_url)
-
   try:
+    if args.proxy_url and len(args.proxy_url.strip()) > 0:
+      setup_proxy(args.proxy_url)
+
     if args.user and args.password:
       print_info('Will log in as %s' % args.user)
     else:
@@ -887,6 +908,8 @@ def subcommand_illust():
   except FileAlreadyExistsError as e:
     die(("File '%s' already exists in output directory. Use --keep-going " + \
          "flag, if you want to overwrite it.") % os.path.basename(e.local_file))
+  except ProxyConnectionFailure as e:
+    die("Couldn't connect to proxy: %s" % e.proxy_url)
 
 if __name__ == '__main__':
   argp = argparse.ArgumentParser(
