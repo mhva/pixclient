@@ -162,6 +162,11 @@ class PixclientPixivAPI(object):
     else:
       self._auth_cache_file = None
 
+  def _make_pixiv_api(self):
+    pixiv_api = PixivAPI()
+    pixiv_api.set_accept_language('ja-JP')
+    return pixiv_api
+
   def _login_using_password(self):
     """
     Authenticates with pixiv using login/password pair. May throw
@@ -169,7 +174,7 @@ class PixclientPixivAPI(object):
 
     Returns a PixivAPI object.
     """
-    pixiv_api = PixivAPI()
+    pixiv_api = self._make_pixiv_api()
 
     try:
       pixiv_api.login(self._username, self._password)
@@ -189,7 +194,7 @@ class PixclientPixivAPI(object):
 
         if auth_info.get('session_token') is not None \
             and auth_info.get('refresh_token') is not None:
-          pixiv_api = PixivAPI()
+          pixiv_api = self._make_pixiv_api()
           pixiv_api.set_auth(
             auth_info['session_token'],
             auth_info['refresh_token'])
