@@ -1,17 +1,19 @@
 # -*- coding:utf-8 -*-
-
-import os
-import sys
-import shutil
+import hashlib
 import json
+import os
+import shutil
+from datetime import datetime
+
 import requests
 
 from .utils import PixivError, JsonDict
 
 
 class BasePixivAPI(object):
-    client_id = 'bYGKuGVw91e0NMfPGp44euvGt59s'
-    client_secret = 'HP3RmkgAmEGro0gn1x9ioawQE8WMfvLXDz3ZqxpK'
+    client_id = 'MOBrBDS8blbauoSck0ZfDbtuzpyT'
+    client_secret = 'lsACyCD94FhDUtGTXi3QzcFE2uU1hqtDaKeqrdwj'
+    hash_secret = '28c1fdd170a5204386cb1313c7077b34f83e4aaf4aa829ce78c231e05b0bae2c'
 
     access_token = None
     user_id = 0
@@ -21,6 +23,17 @@ class BasePixivAPI(object):
         """initialize requests kwargs if need be"""
         self.requests = requests.Session()
         self.requests_kwargs = requests_kwargs
+        self.additional_headers = {}
+
+    def set_additional_headers(self, headers):
+        """manually specify additional headers. will overwrite API default headers in case of collision"""
+        self.additional_headers = headers
+
+    # 设置HTTP的Accept-Language (用于获取tags的对应语言translated_name)
+    # language: en-us, zh-cn, ...
+    def set_accept_language(self, language):
+        """set header Accept-Language for all requests (useful for get tags.translated_name)"""
+        self.additional_headers['Accept-Language'] = language
 
     def parse_json(self, json_str):
         """parse str into JsonDict"""
@@ -40,6 +53,7 @@ class BasePixivAPI(object):
 
     def requests_call(self, method, url, headers={}, params=None, data=None, stream=False):
         """ requests http/https call for Pixiv API """
+        headers.update(self.additional_headers)
         try:
             if (method == 'GET'):
                 return self.requests.get(url, params=params, headers=headers, stream=stream, **self.requests_kwargs)
@@ -59,15 +73,19 @@ class BasePixivAPI(object):
     def login(self, username, password):
         return self.auth(username=username, password=password)
 
+    def set_client(self, client_id, client_secret):
+        self.client_id = client_id
+        self.client_secret = client_secret
+
     def auth(self, username=None, password=None, refresh_token=None):
         """Login with password, or use the refresh_token to acquire a new bearer token"""
 
         url = 'https://oauth.secure.pixiv.net/auth/token'
+        local_time = datetime.now().isoformat()
         headers = {
-            'App-OS': 'ios',
-            'App-OS-Version': '10.3.1',
-            'App-Version': '6.7.1',
-            'User-Agent': 'PixivIOSApp/6.7.1 (iOS 10.3.1; iPhone8,1)',
+            'User-Agent': 'PixivAndroidApp/5.0.64 (Android 6.0)',
+            'X-Client-Time': local_time,
+            'X-Client-Hash': hashlib.md5((local_time+self.hash_secret).encode('utf-8')).hexdigest(),
         }
         data = {
             'get_secure_url': 1,

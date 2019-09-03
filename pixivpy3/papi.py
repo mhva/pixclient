@@ -19,7 +19,7 @@ class PixivAPI(BasePixivAPI):
     # Check auth and set BearerToken to headers
     def auth_requests_call(self, method, url, headers={}, params=None, data=None):
         self.require_auth()
-        headers['Referer'] = 'https://spapi.pixiv.net/'
+        headers['Referer'] = 'http://spapi.pixiv.net/'
         headers['User-Agent'] = 'PixivIOSApp/5.8.7'
         headers['Authorization'] = 'Bearer %s' % self.access_token
         r = self.requests_call(method, url, headers, params, data)
@@ -38,11 +38,12 @@ class PixivAPI(BasePixivAPI):
         return self.parse_result(r)
 
     # 作品详细
-    def works(self, illust_id):
+    def works(self, illust_id, include_sanity_level=False):
         url = 'https://public-api.secure.pixiv.net/v1/works/%d.json' % (illust_id)
         params = {
             'image_sizes': 'px_128x128,small,medium,large,px_480mw',
             'include_stats': 'true',
+            'include_sanity_level': str(include_sanity_level).lower()
         }
         r = self.auth_requests_call('GET', url, params=params)
         return self.parse_result(r)
